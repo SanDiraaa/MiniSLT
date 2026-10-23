@@ -1,6 +1,6 @@
 /**
  * SlotKita - Oriental 243-Ways Arcade Slot Game
- * Phase 5: Master Integration (PixiJS v8, Fu Pot, 12-Coin Jackpot, Enriched Free Spins, HUD, Controls, SoundSystem & WinBanner)
+ * Zero-Bug Production Stabilization: PixiJS v8 Asynchronous Bootstrap, FSM Concurrency Guards & Safe Lifecycle Transitions
  */
 
 import './style.css';
@@ -112,6 +112,7 @@ const controls = new Controls(
 );
 
 let isCanvasReady = false;
+let isSpinRunning = false;
 let canvasInitPromise: Promise<void> | null = null;
 
 // 7. Mount PixiJS Canvas to DOM
@@ -151,6 +152,7 @@ async function bootstrapCanvas(): Promise<void> {
     console.error('[SlotKita] Canvas initialization error:', err);
   } finally {
     isCanvasReady = true;
+    controls.setReady(true);
     controls.syncVisuals();
   }
 }
@@ -164,9 +166,27 @@ async function executeSpinCycle(): Promise<void> {
   if (!isCanvasReady && canvasInitPromise) {
     await canvasInitPromise;
   }
+  if (!isCanvasReady) {
+    console.warn('[SlotKita] Canvas not ready yet');
+    return;
+  }
+
+  // Strict Concurrency Guard: Reject rapid repeated spin clicks while in-flight
+  if (isSpinRunning) {
+    return;
+  }
 
   const currentState = fsm.currentState;
   const isFreeSpinMode = currentState === SlotState.FREE_SPINS || stateStore.getState().freeSpinsLeft > 0;
+
+  // Ensure game is in an actionable state (IDLE or FREE_SPINS)
+  if (currentState !== SlotState.IDLE && !isFreeSpinMode) {
+    return;
+  }
+
+  isSpinRunning = true;
+  controls.syncVisuals();
+
   let result: SpinResult;
 
   try {
@@ -175,13 +195,22 @@ async function executeSpinCycle(): Promise<void> {
       const consumed = stateStore.consumeFreeSpin();
       if (!consumed) {
         if (slotView.freeSpinEngine && slotView.freeSpinEngine.isActive) {
-          slotView.freeSpinEngine.showSummaryModal(() => {
-            slotView.setFreeSpinsMode(false);
-            fsm.transitionTo(SlotState.IDLE);
+          await new Promise<void>((resolveModal) => {
+            slotView.freeSpinEngine!.showSummaryModal(() => {
+              slotView.setFreeSpinsMode(false);
+              stateStore.resetFreeSpinsSession();
+              if (fsm.currentState !== SlotState.IDLE) {
+                fsm.transitionTo(SlotState.IDLE);
+              }
+              resolveModal();
+            });
           });
         } else {
           slotView.setFreeSpinsMode(false);
-          fsm.transitionTo(SlotState.IDLE);
+          stateStore.resetFreeSpinsSession();
+          if (fsm.currentState !== SlotState.IDLE) {
+            fsm.transitionTo(SlotState.IDLE);
+          }
         }
         return;
       }
@@ -197,14 +226,26 @@ async function executeSpinCycle(): Promise<void> {
         : WinEvaluator.spin(1);
     } else {
       slotView.setFreeSpinsMode(false);
+
+      // Pre-check balance before state transition
+      const s = stateStore.getState();
+      if (s.balance < s.currentBet) {
+        stateStore.stopAutoSpin();
+        alert('Saldo koin Anda tidak mencukupi untuk memasang taruhan ini!');
+        if (fsm.currentState !== SlotState.IDLE) {
+          fsm.forceState(SlotState.IDLE);
+        }
+        return;
+      }
+
       if (!fsm.canTransitionTo(SlotState.BET_SUBMITTED)) return;
       fsm.transitionTo(SlotState.BET_SUBMITTED);
 
       const deducted = stateStore.deductBet();
       if (!deducted) {
+        stateStore.stopAutoSpin();
         alert('Saldo koin Anda tidak mencukupi untuk memasang taruhan ini!');
         fsm.transitionTo(SlotState.IDLE);
-        stateStore.stopAutoSpin();
         return;
       }
 
@@ -279,21 +320,30 @@ async function executeSpinCycle(): Promise<void> {
       `;
 
       // 4. Tiered Win Celebration (Big Win >= 20x, Mega Win >= 50x, Super Win >= 100x)
-      const isTierCelebrated = winBanner.showIfEligible(totalPayout, currentBet, () => {
-        // Completed rolling celebration
-      });
+      const isTierEligible = multiplier >= 20;
 
-      if (!isTierCelebrated) {
+      if (isTierEligible) {
+        if (fsm.canTransitionTo(SlotState.WIN_CELEBRATION)) {
+          fsm.transitionTo(SlotState.WIN_CELEBRATION);
+        }
+
+        // Await player claiming/closing the celebration overlay before advancing lifecycle
+        await new Promise<void>((resolveBanner) => {
+          winBanner.showIfEligible(totalPayout, currentBet, () => {
+            resolveBanner();
+          });
+        });
+      } else {
         // Standard win sound and minor coin shower
         soundSystem.playCoinRollup();
         if (multiplier >= 5) {
           slotView.particleManager.triggerCoinShower(2.0, 2);
         }
-      }
 
-      if (fsm.canTransitionTo(SlotState.WIN_CELEBRATION)) {
-        fsm.transitionTo(SlotState.WIN_CELEBRATION);
-        await new Promise((resolve) => setTimeout(resolve, stateStore.getState().isTurbo ? 350 : 800));
+        if (fsm.canTransitionTo(SlotState.WIN_CELEBRATION)) {
+          fsm.transitionTo(SlotState.WIN_CELEBRATION);
+          await new Promise((resolve) => setTimeout(resolve, stateStore.getState().isTurbo ? 350 : 800));
+        }
       }
     } else {
       spinSummary.innerHTML = `<span class="text-slate-400">Tidak ada kombinasi menang pada putaran ini.</span>`;
@@ -321,7 +371,11 @@ async function executeSpinCycle(): Promise<void> {
     // 6. Post-spin Transition & Free Spins / Auto Continuations
     if (stateStore.getState().freeSpinsLeft > 0) {
       if (fsm.currentState !== SlotState.FREE_SPINS) {
-        fsm.transitionTo(SlotState.FREE_SPINS);
+        if (fsm.canTransitionTo(SlotState.FREE_SPINS)) {
+          fsm.transitionTo(SlotState.FREE_SPINS);
+        } else {
+          fsm.forceState(SlotState.FREE_SPINS);
+        }
       }
       setTimeout(() => {
         if (fsm.currentState === SlotState.FREE_SPINS && stateStore.getState().freeSpinsLeft > 0) {
@@ -331,12 +385,23 @@ async function executeSpinCycle(): Promise<void> {
     } else {
       // Check if we just completed a Free Spins session
       if (isFreeSpinMode && slotView.freeSpinEngine) {
-        slotView.freeSpinEngine.showSummaryModal(() => {
-          slotView.setFreeSpinsMode(false);
-          stateStore.resetFreeSpinsSession();
-          fsm.transitionTo(SlotState.IDLE);
+        await new Promise<void>((resolveSummary) => {
+          slotView.freeSpinEngine!.showSummaryModal(() => {
+            slotView.setFreeSpinsMode(false);
+            stateStore.resetFreeSpinsSession();
+            if (fsm.currentState !== SlotState.IDLE) {
+              fsm.transitionTo(SlotState.IDLE);
+            }
+            resolveSummary();
+          });
+        });
 
-          if (stateStore.getState().isAutoSpin) {
+        if (stateStore.getState().isAutoSpin) {
+          const s = stateStore.getState();
+          if (s.balance < s.currentBet) {
+            stateStore.stopAutoSpin();
+            alert('Saldo koin Anda tidak mencukupi untuk melanjutkan putaran otomatis!');
+          } else {
             const continueAuto = stateStore.decrementAutoSpin();
             if (continueAuto) {
               setTimeout(() => {
@@ -346,28 +411,40 @@ async function executeSpinCycle(): Promise<void> {
               }, stateStore.getState().isTurbo ? 250 : 700);
             }
           }
-        });
+        }
       } else {
-        fsm.transitionTo(SlotState.IDLE);
+        slotView.setFreeSpinsMode(false);
+        if (fsm.currentState !== SlotState.IDLE) {
+          fsm.transitionTo(SlotState.IDLE);
+        }
 
         if (stateStore.getState().isAutoSpin) {
-          const continueAuto = stateStore.decrementAutoSpin();
-          if (continueAuto) {
-            setTimeout(() => {
-              if (fsm.currentState === SlotState.IDLE && stateStore.getState().isAutoSpin) {
-                executeSpinCycle();
-              }
-            }, stateStore.getState().isTurbo ? 250 : 700);
+          const s = stateStore.getState();
+          if (s.balance < s.currentBet) {
+            stateStore.stopAutoSpin();
+            alert('Saldo koin Anda tidak mencukupi untuk melanjutkan putaran otomatis!');
+          } else {
+            const continueAuto = stateStore.decrementAutoSpin();
+            if (continueAuto) {
+              setTimeout(() => {
+                if (fsm.currentState === SlotState.IDLE && stateStore.getState().isAutoSpin) {
+                  executeSpinCycle();
+                }
+              }, stateStore.getState().isTurbo ? 250 : 700);
+            }
           }
         }
       }
     }
   } catch (error) {
     console.error('[SlotKita] Spin cycle error occurred, recovering safely to IDLE:', error);
-    if (fsm.canTransitionTo(SlotState.IDLE)) {
-      fsm.transitionTo(SlotState.IDLE);
+    if (fsm.currentState !== SlotState.IDLE) {
+      fsm.forceState(SlotState.IDLE);
     }
     stateStore.stopAutoSpin();
+  } finally {
+    isSpinRunning = false;
+    controls.syncVisuals();
   }
 }
 

@@ -45,6 +45,7 @@ export class SlotView {
   public jackpotModal?: JackpotModal;
   public freeSpinEngine?: FreeSpinEngine;
   private _freeSpinsBanner: Container;
+  private _delayedCalls: gsap.core.Tween[] = [];
 
   constructor() {
     this.app = new Application();
@@ -87,6 +88,8 @@ export class SlotView {
       autoDensity: true,
     });
 
+    // Clear container to avoid duplicate canvas on re-init / HMR
+    containerElement.innerHTML = '';
     containerElement.appendChild(this.app.canvas);
     this.app.stage.addChild(this.stage);
 
@@ -320,6 +323,12 @@ export class SlotView {
     this.clearWins();
     this.hideAllAnticipations();
 
+    // Kill any active reel delayedCalls from previous spin
+    for (const call of this._delayedCalls) {
+      call.kill();
+    }
+    this._delayedCalls = [];
+
     // 1. Start all 5 reels spinning
     for (let r = 0; r < REEL_COUNT; r++) {
       this._reels[r].startSpin(isFreeSpins);
@@ -362,7 +371,7 @@ export class SlotView {
       }
 
       const reelPromise = new Promise<void>((resolve) => {
-        gsap.delayedCall(reelDelaySeconds, () => {
+        const call = gsap.delayedCall(reelDelaySeconds, () => {
           if (isTeaseReel) {
             this.showAnticipation(r);
             if (this._fsm && this._fsm.canTransitionTo(SlotState.ANTICIPATION)) {
@@ -390,6 +399,7 @@ export class SlotView {
             isFreeSpins
           );
         });
+        this._delayedCalls.push(call);
       });
 
       stopPromises.push(reelPromise);

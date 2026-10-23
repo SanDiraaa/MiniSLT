@@ -1,6 +1,6 @@
 /**
  * SlotKita - Independent Reel Column with Dynamic Blur & GSAP Elastic Physics
- * Phase 3: WebGL Vector Graphics & GSAP Animations
+ * Zero-Bug Production Stabilization: Seamless Symbol Recycling & WebGL Blur Optimization
  */
 
 import { Container, BlurFilter } from 'pixi.js';
@@ -10,7 +10,7 @@ import { SymbolId } from '../math/Types';
 import { REEL_STRIPS, FREE_SPIN_REEL_STRIPS, VISIBLE_ROWS } from '../math/ReelStrips';
 
 export const CELL_HEIGHT = 150;
-export const TOTAL_BUFFER_SYMBOLS = 5; // 1 above, 3 visible, 1 below
+export const TOTAL_BUFFER_SYMBOLS = 5; // 1 top buffer, 3 visible rows, 1 bottom buffer
 
 export class Reel extends Container {
   public readonly reelIndex: number;
@@ -20,6 +20,7 @@ export class Reel extends Container {
   private _currentStripIndex: number = 0;
   private _symbolsContainer: Container;
   private _spinTimeline?: gsap.core.Timeline;
+  private _scrollTickerHandler?: () => void;
 
   constructor(reelIndex: number) {
     super();
@@ -28,13 +29,14 @@ export class Reel extends Container {
     this._symbolsContainer = new Container();
     this.addChild(this._symbolsContainer);
 
-    // Dynamic vertical blur filter (proportional to spin speed)
+    // Dynamic vertical blur filter (active only when spin velocity > 0)
     this._blurFilter = new BlurFilter({
       strengthX: 0,
       strengthY: 0,
       quality: 2,
     });
-    this._symbolsContainer.filters = [this._blurFilter];
+    // Start with empty filters array to avoid unnecessary WebGL passes when idle
+    this._symbolsContainer.filters = [];
 
     this.initSymbolPool();
   }
@@ -44,14 +46,16 @@ export class Reel extends Container {
   }
 
   /**
-   * Initializes the pool of 5 symbol views (1 buffer top, 3 visible, 1 buffer bottom).
+   * Initializes the pool of 5 symbol views:
+   * i=0: top buffer (-150px)
+   * i=1..3: visible rows (0px, 150px, 300px)
+   * i=4: bottom buffer (450px)
    */
   private initSymbolPool(): void {
     const strip = REEL_STRIPS[this.reelIndex];
     this._currentStripIndex = 0;
 
     for (let i = 0; i < TOTAL_BUFFER_SYMBOLS; i++) {
-      // Offset i - 1: i=0 is top buffer (-150px), i=1..3 are visible (0, 150, 300px), i=4 is bottom buffer (450px)
       const stripIdx = (strip.length + i - 1) % strip.length;
       const symView = new SymbolView(strip[stripIdx]);
       symView.position.set((CELL_HEIGHT - SYMBOL_SIZE) / 2, (i - 1) * CELL_HEIGHT);
@@ -87,11 +91,8 @@ export class Reel extends Container {
     this._isSpinning = true;
     this.clearHighlights();
 
-    if (this._spinTimeline) {
-      this._spinTimeline.kill();
-      this._spinTimeline = undefined;
-    }
-    gsap.killTweensOf(this._symbolsContainer.position);
+    // Clean up any existing ticker or tweens
+    this.cleanupTweensAndTicker();
 
     const strip = isFreeSpins ? FREE_SPIN_REEL_STRIPS[this.reelIndex] : REEL_STRIPS[this.reelIndex];
     const tl = gsap.timeline();
@@ -110,15 +111,23 @@ export class Reel extends Container {
       duration: 0.08,
       ease: 'none',
       onStart: () => {
+        // Attach blur filter when velocity starts
+        this._symbolsContainer.filters = [this._blurFilter];
         gsap.to(this._blurFilter, { strengthY: 18, duration: 0.18 });
       },
     });
 
-    // Continuous ticker-driven symbol scrolling while spinning
+    // 3. Continuous ticker-driven symbol scrolling while spinning
     const spinSpeed = 28; // px per tick
+    const totalHeight = TOTAL_BUFFER_SYMBOLS * CELL_HEIGHT; // 5 * 150 = 750px
+    const recycleThreshold = VISIBLE_ROWS * CELL_HEIGHT; // 3 * 150 = 450px
+
     const updateScroll = () => {
       if (!this._isSpinning) {
-        gsap.ticker.remove(updateScroll);
+        if (this._scrollTickerHandler) {
+          gsap.ticker.remove(this._scrollTickerHandler);
+          this._scrollTickerHandler = undefined;
+        }
         return;
       }
 
@@ -126,16 +135,17 @@ export class Reel extends Container {
         const view = this._symbolViews[i];
         view.y += spinSpeed;
 
-        // Wrap around bottom to top
-        if (view.y >= (TOTAL_BUFFER_SYMBOLS - 1) * CELL_HEIGHT) {
-          view.y -= TOTAL_BUFFER_SYMBOLS * CELL_HEIGHT;
-          // Fetch next symbol from virtual strip
+        // Smooth wrap-around: As soon as a symbol moves past the bottom of visible viewport (>= 450px),
+        // recycle it to top by subtracting totalHeight (750px), landing seamlessly at (y - 750px)
+        if (view.y >= recycleThreshold) {
+          view.y -= totalHeight;
           this._currentStripIndex = (this._currentStripIndex + 1) % strip.length;
           view.setSymbol(strip[this._currentStripIndex]);
         }
       }
     };
 
+    this._scrollTickerHandler = updateScroll;
     gsap.ticker.add(updateScroll);
   }
 
@@ -153,6 +163,10 @@ export class Reel extends Container {
     onComplete?: () => void,
     isFreeSpins: boolean = false
   ): void {
+    // 1. Mark spinning as ended and clean up active ticker & tweens immediately
+    this._isSpinning = false;
+    this.cleanupTweensAndTicker();
+
     const strip = isFreeSpins ? FREE_SPIN_REEL_STRIPS[this.reelIndex] : REEL_STRIPS[this.reelIndex];
     const stripLen = strip.length;
 
@@ -167,16 +181,6 @@ export class Reel extends Container {
     const btmBuffer = strip[(targetStop + 3) % stripLen];
     const finalFive = [topBuffer, ...targetVisible, btmBuffer];
 
-    // Kill any active spin timeline or tweens on container
-    if (this._spinTimeline) {
-      this._spinTimeline.kill();
-      this._spinTimeline = undefined;
-    }
-    gsap.killTweensOf(this._symbolsContainer.position);
-
-    // Stop continuous scrolling ticker
-    this._isSpinning = false;
-
     // Precisely reset all 5 symbol views into standard rows with target symbols
     for (let i = 0; i < TOTAL_BUFFER_SYMBOLS; i++) {
       this._symbolViews[i].setSymbol(finalFive[i]);
@@ -188,8 +192,6 @@ export class Reel extends Container {
 
     // Start symbol container with deceleration dive from slightly above
     this._symbolsContainer.position.y = -CELL_HEIGHT * 0.6;
-
-    // Overshoot slightly past resting point
     const overshootY = 20;
 
     gsap.to(this._symbolsContainer.position, {
@@ -204,10 +206,20 @@ export class Reel extends Container {
           ease: 'back.out(2.4)',
           onStart: () => {
             // Rapidly remove blur filter during snap back
-            gsap.to(this._blurFilter, { strengthY: 0, duration: 0.12 });
+            gsap.to(this._blurFilter, {
+              strengthY: 0,
+              duration: 0.12,
+              onComplete: () => {
+                // When blur is zero, detach filter to prevent WebGL artifacts
+                this._blurFilter.strengthY = 0;
+                this._symbolsContainer.filters = [];
+              },
+            });
           },
           onComplete: () => {
             this._symbolsContainer.position.y = 0;
+            this._blurFilter.strengthY = 0;
+            this._symbolsContainer.filters = [];
 
             // Pulse landing effect on visible symbols
             for (let i = 1; i <= VISIBLE_ROWS; i++) {
@@ -221,6 +233,25 @@ export class Reel extends Container {
         });
       },
     });
+  }
+
+  /**
+   * Kills all active GSAP animations on this reel and removes the scroll ticker handler.
+   */
+  private cleanupTweensAndTicker(): void {
+    if (this._scrollTickerHandler) {
+      gsap.ticker.remove(this._scrollTickerHandler);
+      this._scrollTickerHandler = undefined;
+    }
+
+    if (this._spinTimeline) {
+      this._spinTimeline.kill();
+      this._spinTimeline = undefined;
+    }
+
+    gsap.killTweensOf(this._symbolsContainer.position);
+    gsap.killTweensOf(this._symbolsContainer);
+    gsap.killTweensOf(this._blurFilter);
   }
 
   /**

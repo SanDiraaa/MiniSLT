@@ -13,6 +13,7 @@ export class Controls {
   private _fsm: StateMachine;
   private _soundSystem: SoundSystem;
   private _onSpinRequested: () => void;
+  private _isReady: boolean = false;
 
   // DOM Elements
   private _balanceEl!: HTMLElement;
@@ -195,6 +196,7 @@ export class Controls {
     // 1. Spin Button Click
     this._spinBtn.addEventListener('click', () => {
       this._soundSystem.playUiClick();
+      if (!this._isReady) return;
       if (this._fsm.currentState === SlotState.IDLE || this._fsm.currentState === SlotState.FREE_SPINS) {
         this._onSpinRequested();
       }
@@ -287,6 +289,12 @@ export class Controls {
     optButtons.forEach((btn) => {
       btn.addEventListener('click', (e) => {
         this._soundSystem.playUiClick();
+        const s = this._stateStore.getState();
+        if (s.balance < s.currentBet) {
+          alert('Saldo koin Anda tidak mencukupi untuk memulai putaran otomatis!');
+          return;
+        }
+
         const count = parseInt((e.currentTarget as HTMLElement).getAttribute('data-spins') || '10', 10);
         this._autoSpinModal.classList.add('hidden');
 
@@ -294,7 +302,7 @@ export class Controls {
         this._autoSpinBtn.className = 'px-2.5 sm:px-3 py-2 rounded-xl border text-xs font-black bg-rose-600 text-white border-rose-400 shadow-md shadow-rose-500/30 animate-pulse transition-all';
         this._autoSpinBtn.textContent = `🔄 AUTO (${count === 999 ? '∞' : count})`;
 
-        if (this._fsm.currentState === SlotState.IDLE) {
+        if (this._isReady && this._fsm.currentState === SlotState.IDLE) {
           this._onSpinRequested();
         }
       });
@@ -349,6 +357,12 @@ export class Controls {
     const spinBtnText = this._container.querySelector('#spinBtnText');
     if (!spinBtnText) return;
 
+    if (!this._isReady) {
+      this._spinBtn.disabled = true;
+      spinBtnText.textContent = '⏳ MEMUAT...';
+      return;
+    }
+
     const state = this._fsm.currentState;
     const s = this._stateStore.getState();
 
@@ -377,9 +391,10 @@ export class Controls {
   }
 
   /**
-   * Optional helper to mark readiness; guarantees visuals are always properly synced.
+   * Marks UI system readiness; guarantees visuals and buttons are properly enabled.
    */
-  public setReady(_ready: boolean): void {
+  public setReady(ready: boolean): void {
+    this._isReady = ready;
     this.syncVisuals();
   }
 }

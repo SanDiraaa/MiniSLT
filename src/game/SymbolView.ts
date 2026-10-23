@@ -24,10 +24,6 @@ export class SymbolView extends Container {
     super();
     this.symbolId = symbolId;
 
-    // Enable hit area / bounds
-    this.width = SYMBOL_SIZE;
-    this.height = SYMBOL_SIZE;
-
     // Sub-containers for layering
     this._glowGraphic = new Graphics();
     this._baseGraphic = new Graphics();

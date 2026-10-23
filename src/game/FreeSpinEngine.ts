@@ -186,7 +186,9 @@ export class FreeSpinEngine extends Container {
         onComplete: () => {
           this.visible = false;
           this._stateStore.resetFreeSpinsSession();
-          this._fsm.transitionTo(SlotState.IDLE);
+          if (this._fsm.currentState !== SlotState.IDLE) {
+            this._fsm.transitionTo(SlotState.IDLE);
+          }
           onDismiss();
         },
       });
